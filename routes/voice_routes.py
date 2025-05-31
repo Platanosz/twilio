@@ -1,14 +1,83 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from utils.elevenlabs import generate_elevenlabs_audio
 from routes.sms_routes import get_call_data_store
+from pydantic import BaseModel
+from config import twilio_client, TWILIO_PHONE_NUMBER
+import uuid
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class CallRequest(BaseModel):
+    message: str
+    phone_number: str
+
+
+@router.post("/call/send")
+async def send_call_with_message(call_request: CallRequest, request: Request):
+    """
+    Send a call with a custom message to a phone number
+
+    This endpoint receives a JSON payload with a message and phone number,
+    then initiates an outbound call to deliver that message.
+    """
+    try:
+        if not twilio_client or not TWILIO_PHONE_NUMBER:
+            raise HTTPException(status_code=500, detail="Twilio client not configured")
+
+        # Validate phone number format (basic validation)
+        if not call_request.phone_number.startswith("+"):
+            raise HTTPException(
+                status_code=400,
+                detail="Phone number must include country code (e.g., +1234567890)",
+            )
+
+        # Store message data for use during the call
+        call_id = str(uuid.uuid4())
+        call_data_store = get_call_data_store()
+        call_data_store[call_id] = {
+            "sms_body": call_request.message,
+            "from_number": TWILIO_PHONE_NUMBER,
+            "to_number": call_request.phone_number,
+            "message_sid": f"api_call_{call_id}",
+        }
+
+        # Generate webhook URL for the call
+        base_url = str(request.base_url).rstrip("/")
+        webhook_url = f"{base_url}/webhook/voice/call/{call_id}"
+
+        # Make the outbound call with webhook URL
+        call = twilio_client.calls.create(
+            url=webhook_url,
+            to=call_request.phone_number,
+            from_=TWILIO_PHONE_NUMBER,
+        )
+
+        logger.info(
+            f"Outbound call initiated: {call.sid} to {call_request.phone_number} with call_id: {call_id}"
+        )
+
+        return {
+            "success": True,
+            "call_sid": call.sid,
+            "call_id": call_id,
+            "message": "Call initiated successfully",
+            "phone_number": call_request.phone_number,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error initiating call: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to initiate call: {str(e)}"
+        )
 
 
 @router.api_route(
@@ -153,20 +222,3 @@ async def handle_voice_input_webhook(
         response.say("Sorry, there was an error. Goodbye!", voice="Polly.Emma")
         response.hangup()
         return str(response)
-
-
-@router.post("/webhook/voice", response_class=PlainTextResponse)
-async def handle_voice_webhook(request: Request):
-    """
-    Handle general voice webhooks from Twilio (fallback)
-
-    This endpoint can be used as a fallback or for handling other voice interactions
-    """
-    try:
-        response = VoiceResponse()
-        response.say("Hello! This is a voice webhook response.", voice="alice")
-        return str(response)
-
-    except Exception as e:
-        logger.error(f"Error processing voice webhook: {str(e)}")
-        return str(VoiceResponse())
