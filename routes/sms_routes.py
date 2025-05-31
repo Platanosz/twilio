@@ -1,5 +1,6 @@
 import uuid
 import logging
+import httpx
 from typing import Optional, Dict
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import PlainTextResponse
@@ -12,6 +13,9 @@ logger = logging.getLogger(__name__)
 call_data_store: Dict[str, Dict] = {}
 
 router = APIRouter()
+
+# Langflow webhook URL
+LANGFLOW_WEBHOOK_URL = "https://e7ef-158-106-193-162.ngrok-free.app/api/v1/webhook/2cda71d5-0c31-4dbb-bce3-904dfb78b9f9"
 
 
 @router.post("/webhook/sms", response_class=PlainTextResponse)
@@ -29,8 +33,8 @@ async def handle_sms_webhook(
     """
     Handle incoming SMS webhooks from Twilio
 
-    This endpoint receives SMS messages and makes an outbound call
-    to the sender using the SMS body as the spoken text.
+    This endpoint receives SMS messages and sends them to Langflow
+    for processing.
     """
     try:
         # Log the incoming SMS details
@@ -41,52 +45,32 @@ async def handle_sms_webhook(
         if NumMedia and int(NumMedia) > 0:
             logger.info(f"Media attached: {MediaUrl0} ({MediaContentType0})")
 
-        # Make outbound call if Twilio client is available
-        if twilio_client and TWILIO_PHONE_NUMBER:
-            try:
-                # Store SMS data for use during the call
-                call_id = str(uuid.uuid4())
-                call_data_store[call_id] = {
-                    "sms_body": Body,
-                    "from_number": From,
-                    "to_number": To,
-                    "message_sid": MessageSid,
-                }
+        # Send request to Langflow
+        try:
+            async with httpx.AsyncClient() as client:
+                langflow_payload = {"text": Body, "phone_number": From}
 
-                # Generate webhook URL for the call
-                base_url = str(request.base_url).rstrip("/")
-                webhook_url = f"{base_url}/webhook/voice/call/{call_id}"
-
-                # Make the outbound call with webhook URL
-                call = twilio_client.calls.create(
-                    url=webhook_url,
-                    to=From,  # Call the person who sent the SMS
-                    from_=TWILIO_PHONE_NUMBER,  # Use your Twilio phone number
+                response = await client.post(
+                    LANGFLOW_WEBHOOK_URL, json=langflow_payload, timeout=30.0
                 )
 
                 logger.info(
-                    f"Outbound call initiated: {call.sid} to {From} with call_id: {call_id}"
+                    f"Langflow request sent successfully. Status: {response.status_code}"
                 )
+                logger.info(f"Langflow response: {response.text}")
 
-                # Create SMS response confirming the call
+                # Create SMS response confirming the message was processed
                 sms_response = MessagingResponse()
                 sms_response.message(
-                    f"Thanks for your message! I'm calling you now to read it back. Call SID: {call.sid}"
+                    f"Thanks for your message! I've received and processed: '{Body}'"
                 )
 
-            except Exception as call_error:
-                logger.error(f"Error making outbound call: {str(call_error)}")
-                # Fallback SMS response if call fails
-                sms_response = MessagingResponse()
-                sms_response.message(
-                    f"Received your message: '{Body}'. Sorry, I couldn't call you back due to an error."
-                )
-        else:
-            # Fallback if Twilio client is not configured
-            logger.warning("Twilio client not configured. Cannot make outbound call.")
+        except Exception as langflow_error:
+            logger.error(f"Error sending request to Langflow: {str(langflow_error)}")
+            # Fallback SMS response if Langflow request fails
             sms_response = MessagingResponse()
             sms_response.message(
-                f"Received your message: '{Body}'. Twilio calling is not configured."
+                f"Received your message: '{Body}'. Sorry, there was an error processing it."
             )
 
         # Return TwiML response
