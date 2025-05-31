@@ -96,17 +96,6 @@ async def handle_sms_webhook(
                     # Use ElevenLabs generated audio
                     call_twiml.play(audio_url)
                     call_twiml.pause(length=1)
-
-                    # Generate goodbye message with ElevenLabs
-                    goodbye_url = await generate_elevenlabs_audio(
-                        "Thank you for your message. Goodbye!", request
-                    )
-                    if goodbye_url:
-                        call_twiml.play(goodbye_url)
-                    else:
-                        call_twiml.say(
-                            "Thank you for your message. Goodbye!", voice="Polly.Emma"
-                        )
                 else:
                     # Fallback to Twilio TTS with improved voice
                     call_twiml.say(
